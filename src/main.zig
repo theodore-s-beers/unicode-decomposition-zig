@@ -129,13 +129,7 @@ pub fn main() !void {
         try ws.objectField(key_hex);
 
         try ws.beginArray();
-        for (entry.value_ptr.*) |value| {
-            const value_hex = try std.fmt.allocPrint(allocator, "{X:0>4}", .{value});
-            defer allocator.free(value_hex);
-
-            try ws.write(value_hex);
-        }
-
+        for (entry.value_ptr.*) |value| try ws.write(value);
         try ws.endArray();
     }
 
