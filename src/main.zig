@@ -123,10 +123,10 @@ pub fn main() !void {
 
     var map_iter = decomp_map.iterator();
     while (map_iter.next()) |entry| {
-        const key_hex = try std.fmt.allocPrint(allocator, "{X:0>4}", .{entry.key_ptr.*});
-        defer allocator.free(key_hex);
+        const key_str = try std.fmt.allocPrint(allocator, "{}", .{entry.key_ptr.*});
+        defer allocator.free(key_str);
 
-        try ws.objectField(key_hex);
+        try ws.objectField(key_str);
 
         try ws.beginArray();
         for (entry.value_ptr.*) |value| try ws.write(value);
