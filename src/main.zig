@@ -12,10 +12,7 @@ pub fn main() !void {
     // Read UnicodeData.txt and normalize newlines
     //
 
-    const file = try std.fs.cwd().openFile("UnicodeData.txt", .{});
-    defer file.close();
-
-    const contents = try file.readToEndAlloc(allocator, 3 * 1024 * 1024);
+    const contents = try std.fs.cwd().readFileAlloc(allocator, "UnicodeData.txt", 3 * 1024 * 1024);
     const normalized = try std.mem.replaceOwned(u8, allocator, contents, "\r\n", "\n");
 
     allocator.free(contents);
