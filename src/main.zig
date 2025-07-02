@@ -23,7 +23,14 @@ pub fn main() !void {
     //
 
     var decomp_map = std.AutoHashMap(u32, []const u32).init(allocator);
-    defer decomp_map.deinit();
+    defer {
+        var map_iter = decomp_map.iterator();
+        while (map_iter.next()) |entry| {
+            allocator.free(entry.value_ptr.*);
+        }
+
+        decomp_map.deinit();
+    }
 
     //
     // Iterate over lines and find canonical decompositions
@@ -131,15 +138,6 @@ pub fn main() !void {
     }
 
     try ws.endObject();
-
-    //
-    // Free the memory backing map values
-    //
-
-    var free_iter = decomp_map.iterator();
-    while (free_iter.next()) |entry| {
-        allocator.free(entry.value_ptr.*);
-    }
 }
 
 fn getCanonicalDecomp(
