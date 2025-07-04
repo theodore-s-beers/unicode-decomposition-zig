@@ -116,13 +116,13 @@ pub fn main() !void {
     }
 
     //
-    // Write decomposition map to a JSON file
+    // Write decomposition map to JSON for debugging
     //
 
     const output_file = try std.fs.cwd().createFile("decomp.json", .{ .truncate = true });
     defer output_file.close();
 
-    var ws = std.json.writeStream(output_file.writer(), .{ .whitespace = .indent_2 });
+    var ws = std.json.writeStream(output_file.writer(), .{});
     try ws.beginObject();
 
     var map_iter = decomp_map.iterator();
@@ -138,7 +138,28 @@ pub fn main() !void {
     }
 
     try ws.endObject();
+
+    //
+    // More importantly, save the map in binary format
+    //
+
+    const output_bin = try std.fs.cwd().createFile("decomp.bin", .{ .truncate = true });
+    defer output_bin.close();
+
+    var decomp_bw = std.io.bufferedWriter(output_bin.writer());
+    try saveDecompMap(&decomp_map, decomp_bw.writer());
+    try decomp_bw.flush();
 }
+
+const DecompEntryHeader = packed struct {
+    key: u32,
+    len: u8,
+};
+
+const DecompMapHeader = packed struct {
+    count: u32,
+    total_bytes: u32,
+};
 
 fn getCanonicalDecomp(
     allocator: std.mem.Allocator,
@@ -214,4 +235,32 @@ fn getCanonicalDecomp(
     const single = try allocator.alloc(u32, 1);
     single[0] = code_point;
     return single[0..];
+}
+
+fn saveDecompMap(map: *const std.AutoHashMap(u32, []const u32), writer: anytype) !void {
+    var payload_bytes: u32 = 0;
+    var payload_iter = map.iterator();
+    while (payload_iter.next()) |kv| {
+        const values = kv.value_ptr.*;
+        payload_bytes += @sizeOf(DecompEntryHeader);
+        payload_bytes += @intCast(values.len * @sizeOf(u32));
+    }
+
+    const main_header = DecompMapHeader{
+        .count = std.mem.nativeToLittle(u32, @intCast(map.count())),
+        .total_bytes = std.mem.nativeToLittle(u32, payload_bytes),
+    };
+    try writer.writeStruct(main_header);
+
+    var write_iter = map.iterator();
+    while (write_iter.next()) |kv| {
+        const values = kv.value_ptr.*;
+        const entry_header = DecompEntryHeader{
+            .key = std.mem.nativeToLittle(u32, kv.key_ptr.*),
+            .len = @intCast(values.len), // u8 has no endianness
+        };
+
+        try writer.writeStruct(entry_header);
+        for (values) |v| try writer.writeInt(u32, v, .little);
+    }
 }
