@@ -25,20 +25,14 @@ pub fn main() !void {
     var listed = std.AutoHashMap(u32, []const u32).init(allocator);
     defer {
         var iter = listed.iterator();
-        while (iter.next()) |entry| {
-            allocator.free(entry.value_ptr.*);
-        }
-
+        while (iter.next()) |entry| allocator.free(entry.value_ptr.*);
         listed.deinit();
     }
 
     var canonical = std.AutoHashMap(u32, []const u32).init(allocator);
     defer {
         var map_iter = canonical.iterator();
-        while (map_iter.next()) |entry| {
-            allocator.free(entry.value_ptr.*);
-        }
-
+        while (map_iter.next()) |entry| allocator.free(entry.value_ptr.*);
         canonical.deinit();
     }
 
@@ -46,9 +40,9 @@ pub fn main() !void {
     // Iterate over lines and find canonical decompositions
     //
 
-    var line_iter = std.mem.splitScalar(u8, normalized, '\n');
+    var line_it = std.mem.splitScalar(u8, normalized, '\n');
 
-    while (line_iter.next()) |line| {
+    while (line_it.next()) |line| {
         if (line.len == 0) continue;
 
         var fields = std.ArrayList([]const u8).init(allocator);
@@ -136,10 +130,10 @@ pub fn main() !void {
     // Write decomposition map to JSON for debugging
     //
 
-    const output_file = try std.fs.cwd().createFile("decomp.json", .{ .truncate = true });
-    defer output_file.close();
+    const out_json = try std.fs.cwd().createFile("decomp.json", .{ .truncate = true });
+    defer out_json.close();
 
-    var ws = std.json.writeStream(output_file.writer(), .{});
+    var ws = std.json.writeStream(out_json.writer(), .{});
     try ws.beginObject();
 
     var map_iter = canonical.iterator();
@@ -160,12 +154,7 @@ pub fn main() !void {
     // More importantly, save the map in binary format
     //
 
-    const output_bin = try std.fs.cwd().createFile("decomp.bin", .{ .truncate = true });
-    defer output_bin.close();
-
-    var decomp_bw = std.io.bufferedWriter(output_bin.writer());
-    try saveDecompMap(&canonical, decomp_bw.writer());
-    try decomp_bw.flush();
+    try saveDecompMap(&canonical, "decomp.bin");
 }
 
 const DecompEntryHeader = packed struct {
@@ -209,10 +198,15 @@ fn getCanonicalDecomp(
     return result.toOwnedSlice();
 }
 
-fn saveDecompMap(map: *const std.AutoHashMap(u32, []const u32), writer: anytype) !void {
+fn saveDecompMap(map: *const std.AutoHashMap(u32, []const u32), path: []const u8) !void {
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+
+    var bw = std.io.bufferedWriter(file.writer());
+
     var payload_bytes: u32 = 0;
-    var payload_iter = map.iterator();
-    while (payload_iter.next()) |kv| {
+    var payload_it = map.iterator();
+    while (payload_it.next()) |kv| {
         const values = kv.value_ptr.*;
         payload_bytes += @sizeOf(DecompEntryHeader);
         payload_bytes += @intCast(values.len * @sizeOf(u32));
@@ -222,17 +216,19 @@ fn saveDecompMap(map: *const std.AutoHashMap(u32, []const u32), writer: anytype)
         .count = std.mem.nativeToLittle(u32, @intCast(map.count())),
         .total_bytes = std.mem.nativeToLittle(u32, payload_bytes),
     };
-    try writer.writeStruct(main_header);
+    try bw.writer().writeStruct(main_header);
 
-    var write_iter = map.iterator();
-    while (write_iter.next()) |kv| {
+    var write_it = map.iterator();
+    while (write_it.next()) |kv| {
         const values = kv.value_ptr.*;
         const entry_header = DecompEntryHeader{
             .key = std.mem.nativeToLittle(u32, kv.key_ptr.*),
             .len = @intCast(values.len), // u8 has no endianness
         };
 
-        try writer.writeStruct(entry_header);
-        for (values) |v| try writer.writeInt(u32, v, .little);
+        try bw.writer().writeStruct(entry_header);
+        for (values) |v| try bw.writer().writeInt(u32, v, .little);
     }
+
+    try bw.flush();
 }
