@@ -22,14 +22,24 @@ pub fn main() !void {
     // Set up decomposition map
     //
 
-    var decomp_map = std.AutoHashMap(u32, []const u32).init(allocator);
+    var listed = std.AutoHashMap(u32, []const u32).init(allocator);
     defer {
-        var map_iter = decomp_map.iterator();
+        var iter = listed.iterator();
+        while (iter.next()) |entry| {
+            allocator.free(entry.value_ptr.*);
+        }
+
+        listed.deinit();
+    }
+
+    var canonical = std.AutoHashMap(u32, []const u32).init(allocator);
+    defer {
+        var map_iter = canonical.iterator();
         while (map_iter.next()) |entry| {
             allocator.free(entry.value_ptr.*);
         }
 
-        decomp_map.deinit();
+        canonical.deinit();
     }
 
     //
@@ -44,9 +54,7 @@ pub fn main() !void {
         var fields = std.ArrayList([]const u8).init(allocator);
 
         var field_iter = std.mem.splitScalar(u8, line, ';');
-        while (field_iter.next()) |field| {
-            try fields.append(field);
-        }
+        while (field_iter.next()) |field| try fields.append(field);
 
         const code_point = try std.fmt.parseInt(u32, fields.items[0], 16);
 
@@ -92,27 +100,36 @@ pub fn main() !void {
 
         std.debug.assert(decomps.items.len > 0);
 
-        var final_decomp: []const u32 = undefined;
+        try listed.put(code_point, try decomps.toOwnedSlice());
+    }
 
-        if (decomps.items.len == 1) {
-            final_decomp = try getCanonicalDecomp(allocator, normalized, decomps.items[0]);
-        } else {
-            var result = std.ArrayList(u32).init(allocator);
-            defer result.deinit();
+    var listed_it = listed.iterator();
 
-            for (decomps.items) |cp| {
-                const canonical = try getCanonicalDecomp(allocator, normalized, cp);
-                try result.appendSlice(canonical);
+    while (listed_it.next()) |kv| {
+        const code_point = kv.key_ptr.*;
+        const decomps = kv.value_ptr.*;
+
+        const final_decomp: []const u32 = blk: {
+            if (decomps.len == 1) {
+                // Single-code-point decomposition; recurse simply
+                break :blk try getCanonicalDecomp(allocator, &listed, decomps[0]);
+            } else {
+                // Multi-code-point decomposition; recurse badly
+                var result = std.ArrayList(u32).init(allocator);
+                defer result.deinit();
+
+                for (decomps) |d| {
+                    const c = try getCanonicalDecomp(allocator, &listed, d);
+                    defer allocator.free(c);
+
+                    try result.appendSlice(c);
+                }
+
+                break :blk try result.toOwnedSlice();
             }
+        };
 
-            final_decomp = try result.toOwnedSlice();
-        }
-
-        //
-        // Add decomposition to map
-        //
-
-        try decomp_map.put(code_point, final_decomp);
+        try canonical.put(code_point, final_decomp);
     }
 
     //
@@ -125,7 +142,7 @@ pub fn main() !void {
     var ws = std.json.writeStream(output_file.writer(), .{});
     try ws.beginObject();
 
-    var map_iter = decomp_map.iterator();
+    var map_iter = canonical.iterator();
     while (map_iter.next()) |entry| {
         const key_str = try std.fmt.allocPrint(allocator, "{}", .{entry.key_ptr.*});
         defer allocator.free(key_str);
@@ -147,7 +164,7 @@ pub fn main() !void {
     defer output_bin.close();
 
     var decomp_bw = std.io.bufferedWriter(output_bin.writer());
-    try saveDecompMap(&decomp_map, decomp_bw.writer());
+    try saveDecompMap(&canonical, decomp_bw.writer());
     try decomp_bw.flush();
 }
 
@@ -162,79 +179,34 @@ const DecompMapHeader = packed struct {
 };
 
 fn getCanonicalDecomp(
-    allocator: std.mem.Allocator,
-    data: []const u8,
+    alloc: std.mem.Allocator,
+    listed: *const std.AutoHashMap(u32, []const u32),
     code_point: u32,
 ) ![]const u32 {
-    const code_point_hex = try std.fmt.allocPrint(allocator, "{X:0>4}", .{code_point});
-    defer allocator.free(code_point_hex);
+    const decomp = listed.get(code_point) orelse {
+        const result = try alloc.alloc(u32, 1);
+        result[0] = code_point;
+        return result;
+    };
 
-    var line_iter = std.mem.splitScalar(u8, data, '\n');
-
-    while (line_iter.next()) |line| {
-        if (std.mem.startsWith(u8, line, code_point_hex)) {
-            var fields = std.ArrayList([]const u8).init(allocator);
-
-            var field_iter = std.mem.splitScalar(u8, line, ';');
-            while (field_iter.next()) |field| {
-                try fields.append(field);
-            }
-
-            const decomp_column = fields.items[5];
-            fields.deinit();
-
-            // No further decomposition
-            if (decomp_column.len == 0) {
-                const single = try allocator.alloc(u32, 1);
-                single[0] = code_point;
-                return single[0..];
-            }
-
-            // Further decomposition is non-canonical
-            if (std.mem.indexOfScalar(u8, decomp_column, '<')) |_| {
-                const single = try allocator.alloc(u32, 1);
-                single[0] = code_point;
-                return single[0..];
-            }
-
-            var decomps = std.ArrayList(u32).init(allocator);
-            defer decomps.deinit();
-
-            var decomp_iter = std.mem.splitScalar(u8, decomp_column, ' ');
-            while (decomp_iter.next()) |decomp_str| {
-                std.debug.assert(4 <= decomp_str.len and decomp_str.len <= 5);
-
-                const decomp = try std.fmt.parseInt(u32, decomp_str, 16);
-                try decomps.append(decomp);
-            }
-
-            std.debug.assert(decomps.items.len > 0);
-
-            // Further single-code-point decomposition; recurse simply
-            if (decomps.items.len == 1) {
-                return getCanonicalDecomp(allocator, data, decomps.items[0]);
-            }
-
-            // Further multi-code-point decomposition; recurse badly
-            var result = std.ArrayList(u32).init(allocator);
-            defer result.deinit();
-
-            for (decomps.items) |cp| {
-                const canonical_decomp = try getCanonicalDecomp(allocator, data, cp);
-                defer allocator.free(canonical_decomp);
-
-                try result.appendSlice(canonical_decomp);
-            }
-
-            const full = try result.toOwnedSlice();
-            return full;
-        }
+    // If the decomposition is a single code point, return it directly
+    if (decomp.len == 1) {
+        const result = try alloc.alloc(u32, 1);
+        result[0] = decomp[0];
+        return result;
     }
 
-    // No further decomposition
-    const single = try allocator.alloc(u32, 1);
-    single[0] = code_point;
-    return single[0..];
+    // Otherwise, we need to recurse for the canonical decomposition
+    var result = std.ArrayList(u32).init(alloc);
+
+    for (decomp) |d| {
+        const c = try getCanonicalDecomp(alloc, listed, d);
+        defer alloc.free(c);
+
+        try result.appendSlice(c);
+    }
+
+    return result.toOwnedSlice();
 }
 
 fn saveDecompMap(map: *const std.AutoHashMap(u32, []const u32), writer: anytype) !void {
